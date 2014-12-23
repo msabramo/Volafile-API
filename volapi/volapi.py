@@ -39,7 +39,7 @@ BASE_ROOM_URL = BASE_URL + "/r/"
 BASE_REST_URL = BASE_URL + "/rest/"
 BASE_WS_URL = "wss://volafile.io/api/"
 
-ThreadSub = namedtuple("ThreadSub", ["queue", "callbacks"])
+AssemblyLine = namedtuple("AssemblyLine", ["queue", "callbacks"])
 
 
 def parse_chat_message(data):
@@ -152,7 +152,7 @@ class RoomConnection(Connection):
         self.listeners = {"user_count": {}, "chat": {}, "file": {},
                           "delete_file": {}, "changed_config": {},
                           "chat_name": {}, "owner": {}, "fileinfo": {}}
-        self.num_listeners = 0
+        self.listening_threads = {}
 
         self._ping_interval = 20  # default
 
@@ -184,7 +184,9 @@ class RoomConnection(Connection):
             raise IOError("Failed to get checksums")
 
     def enqueue_data(self, event_type, data):
-        """Enqueues data of given type so listeners can see it."""
+        """Enqueues data of given type so listeners can see it. Data is
+        only added if it is a known types, see Room's docstring for
+        add_listener."""
         if event_type not in self.listeners:
             return
         with self.lock:
@@ -198,9 +200,13 @@ class RoomConnection(Connection):
         with self.lock:
             thread_id = get_ident()
             if thread_id not in self.listeners[event_type]:
-                self.listeners[event_type][thread_id] = ThreadSub(deque(), [])
-            self.listeners[event_type][thread_id].callbacks.append(callback)
-            self.num_listeners += 1
+                self.listeners[event_type][thread_id] = AssemblyLine(
+                    deque(), [])
+                self.listening_threads[thread_id] = {
+                    "num_cbs": 0, "lock": Lock()}
+            with self.listening_threads[thread_id]['lock']:
+                self.listeners[event_type][thread_id].callbacks.append(callback)
+                self.listening_threads[thread_id]['num_cbs'] += 1
 
     def listen(self):
         """Listen for incoming events for the given room.
@@ -210,25 +216,28 @@ class RoomConnection(Connection):
         The function will not return unless all listeners are detached again or
         the WebSocket connection is closed.
         """
-        if self.num_listeners == 0:
+        thread_id = get_ident()
+        if self.listening_threads[thread_id]['num_cbs'] == 0:
             raise ValueError("At least one listener must be added")
 
-        while self.connected and self.num_listeners:
+        while self.connected and self.listening_threads[thread_id]['num_cbs']:
             with self.condition:
                 self.condition.wait()
 
             for event_type in self.listeners:
-                sub = self.listeners[event_type].get(get_ident())
-                if sub is None:
-                    continue
-                queue, callbacks = sub
-                with self.lock:
+                with self.listening_threads[thread_id]['lock']:
+                    line = self.listeners[event_type].get(thread_id)
+                    if line is None:
+                        continue
+
+                    queue, callbacks = line
                     while queue:
                         data = queue.popleft()
                         num_cbs = len(callbacks)
                         callbacks[:] = [
                             cb for cb in callbacks if cb(data) is not False]
-                        self.num_listeners -= num_cbs - len(callbacks)
+                        diff = num_cbs - len(callbacks)
+                        self.listening_threads[thread_id]['num_cbs'] -= diff
 
     def listen_forever(self, room):
         """Listens for new data about the room from the websocket
