@@ -205,7 +205,8 @@ class RoomConnection(Connection):
                 self.listening_threads[thread_id] = {
                     "num_cbs": 0, "lock": Lock()}
             with self.listening_threads[thread_id]['lock']:
-                self.listeners[event_type][thread_id].callbacks.append(callback)
+                self.listeners[event_type][
+                    thread_id].callbacks.append(callback)
                 self.listening_threads[thread_id]['num_cbs'] += 1
 
     def listen(self):
@@ -217,7 +218,8 @@ class RoomConnection(Connection):
         the WebSocket connection is closed.
         """
         thread_id = get_ident()
-        if self.listening_threads[thread_id]['num_cbs'] == 0:
+        if not thread_id in self.listening_threads or not self.listening_threads[
+                thread_id]['num_cbs']:
             raise ValueError("At least one listener must be added")
 
         while self.connected and self.listening_threads[thread_id]['num_cbs']:
